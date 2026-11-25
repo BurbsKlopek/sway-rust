@@ -1,0 +1,19 @@
+# Build artifacts & dependencies
+rust/target/
+android/build/
+android/app/build/
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/app/src/main/jniLibs/
+/vendor/
+
+# OS / IDE / Signing
+.DS_Store
+*.iml
+.idea/
+*.apk
+*.aab
+*.idsig
+*.keystore
+*.jks
