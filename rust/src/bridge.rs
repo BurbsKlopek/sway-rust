@@ -84,6 +84,40 @@ pub fn get_files_dir() -> String {
     .unwrap_or_else(|| "/data/data/com.burbsklopek.swayrust/files".to_string())
 }
 
+pub fn get_cache_dir() -> String {
+    with_activity(|env, act| {
+        let val = env
+            .call_method(act, "rustGetCacheDir", "()Ljava/lang/String;", &[])
+            .ok()?
+            .l()
+            .ok()?;
+        let jstr = JString::from(val);
+        let s: String = env.get_string(&jstr).ok()?.into();
+        Some(s)
+    })
+    .unwrap_or_else(|| "/data/data/com.burbsklopek.swayrust/cache".to_string())
+}
+
+pub fn install_apk(apk_path: &str) -> String {
+    with_activity(|env, act| {
+        let j_path = env.new_string(apk_path).ok()?;
+        let val = env
+            .call_method(
+                act,
+                "rustInstallApk",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&JObject::from(j_path))],
+            )
+            .ok()?
+            .l()
+            .ok()?;
+        let jstr = JString::from(val);
+        let s: String = env.get_string(&jstr).ok()?.into();
+        Some(s)
+    })
+    .unwrap_or_else(|| "ERR:JNI unavailable".to_string())
+}
+
 pub fn get_lan_ip() -> Option<String> {
     with_activity(|env, act| {
         let val = env

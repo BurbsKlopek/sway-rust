@@ -1,15 +1,20 @@
 package com.burbsklopek.swayrust
 
 import android.app.NativeActivity
+import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.KeyEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
+import java.io.File
+import java.io.FileInputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
@@ -129,6 +134,65 @@ class SwayRustActivity : NativeActivity() {
             filesDir.absolutePath
         } catch (_: Throwable) {
             "/data/data/com.burbsklopek.swayrust/files"
+        }
+    }
+
+    fun rustGetCacheDir(): String {
+        return try {
+            cacheDir.absolutePath
+        } catch (_: Throwable) {
+            "/data/data/com.burbsklopek.swayrust/cache"
+        }
+    }
+
+    fun rustInstallApk(apkPath: String): String {
+        return try {
+            val file = File(apkPath)
+            if (!file.exists() || file.length() < 100_000L) {
+                return "ERR:Downloaded APK file is missing or incomplete"
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                val permIntent = Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                try {
+                    startActivity(permIntent)
+                } catch (_: Throwable) {
+                }
+                return "NEED_PERMISSION"
+            }
+
+            val installer = packageManager.packageInstaller
+            val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+            params.setSize(file.length())
+            val sessionId = installer.createSession(params)
+            val session = installer.openSession(sessionId)
+
+            session.openWrite("sway_rust_update", 0, file.length()).use { out ->
+                FileInputStream(file).use { input ->
+                    val buf = ByteArray(65_536)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                    }
+                }
+                session.fsync(out)
+            }
+
+            val callbackIntent = Intent(this, UpdateInstallReceiver::class.java)
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pending = PendingIntent.getBroadcast(this, sessionId, callbackIntent, flags)
+            session.commit(pending.intentSender)
+            session.close()
+            "OK"
+        } catch (t: Throwable) {
+            "ERR:${t.message ?: t.javaClass.simpleName}"
         }
     }
 

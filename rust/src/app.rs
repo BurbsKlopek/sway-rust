@@ -5,6 +5,7 @@ use crate::images::{ImageCache, ImgKind};
 use crate::models::*;
 use crate::store;
 use crate::sync::{self, PollTokenResult};
+use crate::updater::{self, ReleaseInfo, UpdateCheckOutcome, CURRENT_VERSION};
 
 use chrono::Utc;
 use egui::{
@@ -50,6 +51,25 @@ enum ModalState {
     Details(MediaItem),
     DeviceAuth(DeviceAuthSession),
     BuyMeACoffee,
+    Updater,
+}
+
+#[derive(Debug, Clone)]
+enum UpdateUiState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(ReleaseInfo),
+    Downloading {
+        info: ReleaseInfo,
+        downloaded: u64,
+        total: u64,
+    },
+    ReadyToInstall {
+        info: ReleaseInfo,
+        apk_path: String,
+    },
+    Error(String),
 }
 
 enum BgEvent {
@@ -76,6 +96,15 @@ enum BgEvent {
         flushed_op_ids: Vec<String>,
         silent: bool,
     },
+    UpdateChecked {
+        outcome: UpdateCheckOutcome,
+        silent: bool,
+    },
+    UpdateDownloadProgress {
+        downloaded: u64,
+        total: u64,
+    },
+    UpdateDownloadFinished(Result<(ReleaseInfo, String), String>),
 }
 
 struct FlyOutAnim {
@@ -143,7 +172,11 @@ pub struct SwayApp {
     auth_poll_inflight: bool,
 
     // Themes & Settings state
-    settings_focus: usize, // 0..6 theme presets, 6..16 settings rows
+    settings_focus: usize, // 0..6 theme presets, 6..18 settings rows
+
+    // In-App OTA Updater state
+    update_ui: UpdateUiState,
+    updater_btn_idx: usize,
 
     modal: ModalState,
     toast: Option<ToastBanner>,
@@ -222,6 +255,8 @@ impl SwayApp {
             last_auth_poll: now,
             auth_poll_inflight: false,
             settings_focus: 0,
+            update_ui: UpdateUiState::Idle,
+            updater_btn_idx: 0,
             modal: ModalState::None,
             toast: None,
             start_time: now,
@@ -230,6 +265,7 @@ impl SwayApp {
 
         app.filter_deck_in_place();
         app.spawn_fetch_deck(cc.egui_ctx.clone(), true, 0);
+        app.spawn_check_update(cc.egui_ctx.clone(), true);
         if !app.state.credentials.trakt_access_token.is_empty()
             || !app.state.credentials.simkl_access_token.is_empty()
         {
@@ -300,6 +336,74 @@ impl SwayApp {
 
     fn persist(&self) {
         store::save_state(&self.state);
+    }
+
+    fn available_update_version(&self) -> Option<&str> {
+        match &self.update_ui {
+            UpdateUiState::Available(info)
+            | UpdateUiState::Downloading { info, .. }
+            | UpdateUiState::ReadyToInstall { info, .. } => Some(&info.version),
+            _ => None,
+        }
+    }
+
+    fn spawn_check_update(&mut self, ctx: egui::Context, silent: bool) {
+        if matches!(
+            self.update_ui,
+            UpdateUiState::Checking | UpdateUiState::Downloading { .. }
+        ) {
+            return;
+        }
+        self.update_ui = UpdateUiState::Checking;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let outcome = updater::check_for_update();
+            let _ = tx.send(BgEvent::UpdateChecked { outcome, silent });
+            ctx.request_repaint();
+        });
+    }
+
+    fn spawn_download_update(&mut self, ctx: egui::Context, info: ReleaseInfo) {
+        self.update_ui = UpdateUiState::Downloading {
+            info: info.clone(),
+            downloaded: 0,
+            total: info.apk_size,
+        };
+        let cache_dir = bridge::get_cache_dir();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let tx_prog = tx.clone();
+            let ctx_prog = ctx.clone();
+            let res = updater::download_apk(
+                &info.apk_url,
+                &cache_dir,
+                info.apk_size,
+                move |dl, tot| {
+                    let _ = tx_prog.send(BgEvent::UpdateDownloadProgress {
+                        downloaded: dl,
+                        total: tot,
+                    });
+                    ctx_prog.request_repaint();
+                },
+            )
+            .map(|path| (info, path));
+            let _ = tx.send(BgEvent::UpdateDownloadFinished(res));
+            ctx.request_repaint();
+        });
+    }
+
+    fn trigger_apk_install(&mut self, apk_path: &str) {
+        let status = bridge::install_apk(apk_path);
+        if status == "OK" {
+            self.show_toast("Opening Android TV update installer…", Some(SwipeAction::Watched));
+        } else if status == "NEED_PERMISSION" {
+            self.show_toast(
+                "Allow 'Install unknown apps' for Sway Rust, then press Install Update again.",
+                None,
+            );
+        } else {
+            self.show_toast(format!("Install error: {status}"), Some(SwipeAction::Skipped));
+        }
     }
 
     fn filter_deck_in_place(&mut self) {
@@ -776,6 +880,55 @@ impl SwayApp {
                         );
                     }
                 }
+                BgEvent::UpdateChecked { outcome, silent } => match outcome {
+                    UpdateCheckOutcome::UpToDate { .. } => {
+                        self.update_ui = UpdateUiState::UpToDate;
+                        if !silent {
+                            self.show_toast(
+                                format!("Sway Rust v{CURRENT_VERSION} is up to date"),
+                                Some(SwipeAction::ToWatch),
+                            );
+                        }
+                    }
+                    UpdateCheckOutcome::Available(info) => {
+                        let ver = info.version.clone();
+                        self.update_ui = UpdateUiState::Available(info);
+                        self.updater_btn_idx = 0;
+                        self.show_toast(
+                            format!("Update v{ver} available! Open Themes → App Updates"),
+                            Some(SwipeAction::Watched),
+                        );
+                    }
+                    UpdateCheckOutcome::Error(err) => {
+                        self.update_ui = UpdateUiState::Error(err.clone());
+                        if !silent {
+                            self.show_toast(err, Some(SwipeAction::Skipped));
+                        }
+                    }
+                },
+                BgEvent::UpdateDownloadProgress { downloaded, total } => {
+                    if let UpdateUiState::Downloading { info, .. } = self.update_ui.clone() {
+                        self.update_ui = UpdateUiState::Downloading {
+                            info,
+                            downloaded,
+                            total,
+                        };
+                    }
+                }
+                BgEvent::UpdateDownloadFinished(res) => match res {
+                    Ok((info, apk_path)) => {
+                        self.update_ui = UpdateUiState::ReadyToInstall {
+                            info,
+                            apk_path: apk_path.clone(),
+                        };
+                        self.updater_btn_idx = 0;
+                        self.trigger_apk_install(&apk_path);
+                    }
+                    Err(err) => {
+                        self.update_ui = UpdateUiState::Error(err.clone());
+                        self.show_toast(err, Some(SwipeAction::Skipped));
+                    }
+                },
             }
         }
     }
@@ -969,11 +1122,14 @@ impl SwayApp {
             .filter(|e| e.action != SwipeAction::Skipped)
             .count();
 
+        let upd_ver_opt = self.available_update_version().map(str::to_string);
+        let max_rail_idx = if upd_ver_opt.is_some() { 6 } else { 5 };
+
         if self.top_rail_focused && matches!(self.modal, ModalState::None) {
             let mut activate = false;
             ctx.input(|i| {
                 if i.key_pressed(Key::ArrowRight) {
-                    self.top_rail_idx = (self.top_rail_idx + 1).min(5);
+                    self.top_rail_idx = (self.top_rail_idx + 1).min(max_rail_idx);
                 } else if i.key_pressed(Key::ArrowLeft) {
                     self.top_rail_idx = self.top_rail_idx.saturating_sub(1);
                 } else if i.key_pressed(Key::ArrowDown) {
@@ -992,6 +1148,10 @@ impl SwayApp {
                     5 => {
                         self.filter_row = 0;
                         self.modal = ModalState::Filters;
+                    }
+                    6 => {
+                        self.updater_btn_idx = 0;
+                        self.modal = ModalState::Updater;
                     }
                     _ => {}
                 }
@@ -1047,9 +1207,25 @@ impl SwayApp {
                 ui.add_space(6.0);
             }
 
-            // Right-aligned Undo & Filters pills
+            // Right-aligned Undo, Filters & Update pills
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(40.0);
+                if let Some(ref uver) = upd_ver_opt {
+                    let up_focused = self.top_rail_focused
+                        && matches!(self.modal, ModalState::None)
+                        && self.top_rail_idx == 6;
+                    if Self::glass_pill_button(
+                        ui,
+                        &format!("↑ Update v{uver}"),
+                        true,
+                        up_focused,
+                        Color32::from_rgb(52, 211, 153),
+                    ) {
+                        self.updater_btn_idx = 0;
+                        self.modal = ModalState::Updater;
+                    }
+                    ui.add_space(8.0);
+                }
                 let f_focused = self.top_rail_focused
                     && matches!(self.modal, ModalState::None)
                     && self.top_rail_idx == 5;
@@ -2385,7 +2561,7 @@ impl SwayApp {
         let theme = self.state.settings.theme_preset;
         let primary = theme.primary();
         let allow_keys = !self.top_rail_focused && matches!(self.modal, ModalState::None);
-        const TOTAL_ITEMS: usize = 17; // 0..6 themes + 11 settings rows
+        const TOTAL_ITEMS: usize = 18; // 0..6 themes + 12 settings rows
 
         let mut chosen: Option<usize> = None;
         if allow_keys {
@@ -2498,36 +2674,54 @@ impl SwayApp {
 
                 ui.add_space(10.0);
 
-                // Settings Rows (indices 6..=16)
+                // Settings Rows (indices 6..=17)
+                let upd_badge = match &self.update_ui {
+                    UpdateUiState::Available(info) => format!("Update Available (v{})!", info.version),
+                    UpdateUiState::Downloading { downloaded, total, .. } => {
+                        let pct = if *total > 0 {
+                            ((*downloaded as f64 / *total as f64) * 100.0) as u32
+                        } else {
+                            0
+                        };
+                        format!("Downloading… {pct}%")
+                    }
+                    UpdateUiState::ReadyToInstall { info, .. } => {
+                        format!("Ready to Install v{}", info.version)
+                    }
+                    UpdateUiState::Checking => "Checking GitHub…".into(),
+                    UpdateUiState::UpToDate => format!("v{CURRENT_VERSION} · Up to Date"),
+                    _ => format!("v{CURRENT_VERSION} · Check for Updates"),
+                };
                 let s = &self.state.settings;
-                let rows: [(usize, &str, String); 11] = [
-                    (6, "Display Typography", s.font_pairing.label().to_string()),
-                    (7, "Glass Crystal Intensity", s.glass_intensity.label().to_string()),
+                let rows: [(usize, &str, String); 12] = [
+                    (6, "App Updates (GitHub OTA)", upd_badge),
+                    (7, "Display Typography", s.font_pairing.label().to_string()),
+                    (8, "Glass Crystal Intensity", s.glass_intensity.label().to_string()),
                     (
-                        8,
+                        9,
                         "4K Cinema Backdrop Blur",
                         if s.backdrop_blur_enabled { "ON" } else { "OFF" }.into(),
                     ),
                     (
-                        9,
+                        10,
                         "Poster Aura Glow Shadow",
                         if s.card_shadow_glow { "ON" } else { "OFF" }.into(),
                     ),
-                    (10, "Swipe Spring Speed", s.swipe_speed.label().to_string()),
-                    (11, "TV Remote Control Scheme", s.control_scheme.label().to_string()),
+                    (11, "Swipe Spring Speed", s.swipe_speed.label().to_string()),
+                    (12, "TV Remote Control Scheme", s.control_scheme.label().to_string()),
                     (
-                        12,
+                        13,
                         "Default Trailer Video Quality",
                         s.default_video_quality.label().to_string(),
                     ),
-                    (13, "Cloud Sync Target", s.sync_target_mode.label().to_string()),
+                    (14, "Cloud Sync Target", s.sync_target_mode.label().to_string()),
                     (
-                        14,
+                        15,
                         "Hide Already Tracked Titles",
                         if s.hide_already_tracked { "ON" } else { "OFF" }.into(),
                     ),
-                    (15, "Reset All Passed Titles", "Restore to Deck".into()),
-                    (16, "Support Sway · Buy Me a Coffee", "Show 4K QR Code".into()),
+                    (16, "Reset All Passed Titles", "Restore to Deck".into()),
+                    (17, "Support Sway · Buy Me a Coffee", "Show 4K QR Code".into()),
                 ];
 
                 for (r_idx, title, val) in rows {
@@ -2598,48 +2792,55 @@ impl SwayApp {
                     self.persist();
                 }
                 6 => {
+                    self.updater_btn_idx = 0;
+                    if matches!(self.update_ui, UpdateUiState::Idle | UpdateUiState::Error(_)) {
+                        self.spawn_check_update(ctx.clone(), false);
+                    }
+                    self.modal = ModalState::Updater;
+                }
+                7 => {
                     self.state.settings.font_pairing = self.state.settings.font_pairing.next();
                     self.persist();
                 }
-                7 => {
+                8 => {
                     self.state.settings.glass_intensity =
                         self.state.settings.glass_intensity.next();
                     self.persist();
                 }
-                8 => {
+                9 => {
                     self.state.settings.backdrop_blur_enabled =
                         !self.state.settings.backdrop_blur_enabled;
                     self.persist();
                 }
-                9 => {
+                10 => {
                     self.state.settings.card_shadow_glow = !self.state.settings.card_shadow_glow;
                     self.persist();
                 }
-                10 => {
+                11 => {
                     self.state.settings.swipe_speed = self.state.settings.swipe_speed.next();
                     self.persist();
                 }
-                11 => {
+                12 => {
                     self.state.settings.control_scheme = self.state.settings.control_scheme.next();
                     self.persist();
                 }
-                12 => {
+                13 => {
                     self.state.settings.default_video_quality =
                         self.state.settings.default_video_quality.next();
                     self.persist();
                 }
-                13 => {
+                14 => {
                     self.state.settings.sync_target_mode =
                         self.state.settings.sync_target_mode.next();
                     self.persist();
                 }
-                14 => {
+                15 => {
                     self.state.settings.hide_already_tracked =
                         !self.state.settings.hide_already_tracked;
                     self.filter_deck_in_place();
                     self.persist();
                 }
-                15 => {
+                16 => {
                     self.state
                         .tracked
                         .retain(|_, v| v.action != SwipeAction::Skipped);
@@ -2647,7 +2848,7 @@ impl SwayApp {
                     self.spawn_fetch_deck(ctx.clone(), true, 0);
                     self.show_toast("Cleared passed history & refreshed deck", None);
                 }
-                16 => {
+                17 => {
                     self.modal = ModalState::BuyMeACoffee;
                 }
                 _ => {}
@@ -3199,6 +3400,219 @@ impl SwayApp {
 
                 if close {
                     self.modal = ModalState::None;
+                }
+            }
+
+            ModalState::Updater => {
+                let theme = self.state.settings.theme_preset;
+                let primary = theme.primary();
+                let emerald = Color32::from_rgb(52, 211, 153);
+                let ui_state = self.update_ui.clone();
+
+                let mut btn_act: Option<usize> = None;
+                ctx.input(|i| {
+                    if i.key_pressed(Key::ArrowRight) {
+                        self.updater_btn_idx = (self.updater_btn_idx + 1).min(1);
+                    } else if i.key_pressed(Key::ArrowLeft) {
+                        self.updater_btn_idx = self.updater_btn_idx.saturating_sub(1);
+                    } else if i.key_pressed(Key::Enter) || i.key_pressed(Key::Space) {
+                        btn_act = Some(self.updater_btn_idx);
+                    }
+                });
+
+                self.modal_backdrop_window(ctx, "sway_updater_modal", 520.0, |this, ui| {
+                    ui.label(
+                        RichText::new("Sway Rust · In-App Updater")
+                            .font(this.display_font(23.0))
+                            .strong()
+                            .color(Color32::WHITE),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Installed version: v{CURRENT_VERSION}  ·  GitHub: BurbsKlopek/sway-rust"
+                        ))
+                        .font(FontId::proportional(12.5))
+                        .color(Color32::from_rgb(165, 180, 198)),
+                    );
+                    ui.add_space(14.0);
+
+                    egui::Frame::NONE
+                        .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 12))
+                        .stroke(Stroke::new(
+                            1.0_f32,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 26),
+                        ))
+                        .corner_radius(CornerRadius::same(14))
+                        .inner_margin(egui::Margin::same(16))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            match &ui_state {
+                                UpdateUiState::Idle | UpdateUiState::Checking => {
+                                    ui.label(
+                                        RichText::new("Checking GitHub Releases for updates…")
+                                            .font(FontId::proportional(14.5))
+                                            .color(primary),
+                                    );
+                                }
+                                UpdateUiState::UpToDate => {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "✓ You're running the latest release (v{CURRENT_VERSION})."
+                                        ))
+                                        .font(FontId::proportional(14.5))
+                                        .strong()
+                                        .color(emerald),
+                                    );
+                                }
+                                UpdateUiState::Available(info) => {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "New Release Available: {} ({})",
+                                            info.title,
+                                            updater::format_mb(info.apk_size)
+                                        ))
+                                        .font(FontId::proportional(15.5))
+                                        .strong()
+                                        .color(emerald),
+                                    );
+                                    if !info.published_date.is_empty() {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Published {}",
+                                                info.published_date
+                                            ))
+                                            .font(FontId::proportional(11.5))
+                                            .color(Color32::from_rgb(152, 166, 184)),
+                                        );
+                                    }
+                                    ui.add_space(8.0);
+                                    let notes_short: String =
+                                        info.notes.chars().take(280).collect();
+                                    ui.label(
+                                        RichText::new(notes_short)
+                                            .font(FontId::proportional(13.0))
+                                            .color(Color32::from_rgb(214, 224, 236)),
+                                    );
+                                }
+                                UpdateUiState::Downloading {
+                                    info,
+                                    downloaded,
+                                    total,
+                                } => {
+                                    let frac = if *total > 0 {
+                                        (*downloaded as f32 / *total as f32).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Downloading {}…  {} / {} ({:.0}%)",
+                                            info.apk_name,
+                                            updater::format_mb(*downloaded),
+                                            updater::format_mb(*total),
+                                            frac * 100.0
+                                        ))
+                                        .font(FontId::proportional(14.0))
+                                        .strong()
+                                        .color(primary),
+                                    );
+                                    ui.add_space(10.0);
+                                    let bar_w = ui.available_width();
+                                    let (bar_r, _) =
+                                        ui.allocate_exact_size(Vec2::new(bar_w, 10.0), Sense::hover());
+                                    ui.painter().rect_filled(
+                                        bar_r,
+                                        CornerRadius::same(5),
+                                        Color32::from_rgba_unmultiplied(255, 255, 255, 24),
+                                    );
+                                    let fill_r = Rect::from_min_size(
+                                        bar_r.min,
+                                        Vec2::new(bar_w * frac, bar_r.height()),
+                                    );
+                                    ui.painter()
+                                        .rect_filled(fill_r, CornerRadius::same(5), emerald);
+                                }
+                                UpdateUiState::ReadyToInstall { info, .. } => {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "✓ {} downloaded & verified!",
+                                            info.title
+                                        ))
+                                        .font(FontId::proportional(15.0))
+                                        .strong()
+                                        .color(emerald),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(
+                                            "Select 'Install Update Now' to launch the Android TV package installer.",
+                                        )
+                                        .font(FontId::proportional(13.0))
+                                        .color(Color32::from_rgb(206, 218, 232)),
+                                    );
+                                }
+                                UpdateUiState::Error(err) => {
+                                    ui.label(
+                                        RichText::new(err)
+                                            .font(FontId::proportional(13.5))
+                                            .color(theme.pass_color()),
+                                    );
+                                }
+                            }
+                        });
+
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        let primary_lbl = match &ui_state {
+                            UpdateUiState::Available(_) => "Download & Install Update",
+                            UpdateUiState::ReadyToInstall { .. } => "Install Update Now",
+                            UpdateUiState::Downloading { .. } => "Downloading…",
+                            _ => "Check for Updates",
+                        };
+                        let primary_col = match &ui_state {
+                            UpdateUiState::Available(_) | UpdateUiState::ReadyToInstall { .. } => {
+                                emerald
+                            }
+                            _ => primary,
+                        };
+                        if Self::action_dock_pill(
+                            ui,
+                            primary_lbl,
+                            primary_col,
+                            this.updater_btn_idx == 0,
+                        ) {
+                            btn_act = Some(0);
+                        }
+                        ui.add_space(8.0);
+                        if Self::action_dock_pill(
+                            ui,
+                            "Close",
+                            Color32::from_rgb(160, 174, 192),
+                            this.updater_btn_idx == 1,
+                        ) {
+                            btn_act = Some(1);
+                        }
+                    });
+                });
+
+                if let Some(b) = btn_act {
+                    if b == 1 {
+                        self.modal = ModalState::None;
+                    } else {
+                        match ui_state {
+                            UpdateUiState::Available(info) => {
+                                self.spawn_download_update(ctx.clone(), info);
+                            }
+                            UpdateUiState::ReadyToInstall { apk_path, .. } => {
+                                self.trigger_apk_install(&apk_path);
+                            }
+                            UpdateUiState::Downloading { .. } => {}
+                            _ => {
+                                self.spawn_check_update(ctx.clone(), false);
+                            }
+                        }
+                    }
                 }
             }
         }

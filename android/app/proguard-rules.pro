@@ -2,3 +2,6 @@
     public *;
     native <methods>;
 }
+-keep class com.burbsklopek.swayrust.UpdateInstallReceiver {
+    *;
+}

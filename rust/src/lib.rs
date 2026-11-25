@@ -6,6 +6,7 @@ mod images;
 mod models;
 mod store;
 mod sync;
+mod updater;
 
 use android_activity::AndroidApp;
 use app::SwayApp;

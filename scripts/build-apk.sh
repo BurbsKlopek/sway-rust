@@ -33,6 +33,8 @@ chmod +x ./gradlew
 
 OUT_DIR="$HOME/Downloads/Android Development"
 mkdir -p "$OUT_DIR"
-OUT_APK="$OUT_DIR/Sway-Rust-v1.0.0.apk"
+VERSION_NAME="$(python3 -c 'import re,sys; print(re.search(r"versionName\s*=\s*\"([^\"]+)\"", open(sys.argv[1]).read()).group(1))' "$ROOT_DIR/android/app/build.gradle.kts")"
+OUT_APK="$OUT_DIR/Sway-Rust-v${VERSION_NAME}.apk"
+rm -f "$OUT_DIR"/Sway-Rust-v*.apk
 cp "$ROOT_DIR/android/app/build/outputs/apk/release/app-release.apk" "$OUT_APK"
 ls -lh "$OUT_APK"

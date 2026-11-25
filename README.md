@@ -23,6 +23,8 @@ A **Pure Native Rust 4K OpenGL ES 3.0 Swipe-Deck Watch Tracker** for **Android T
   - **6 Dual-Tone Glass Themes**: `Aurora Prism`, `Midnight Nebula`, `Crimson Velvet`, `Obsidian Gold`, `Arctic Sapphire`, `Titanium Neon`.
   - **4 Bundled Cinema Display Fonts**: `Outfit`, `Fraunces`, `Syne`, and `Space Grotesk` paired with `Plus Jakarta Sans`.
   - Separable multi-pass cinema backdrop blur, adjustable glass crystal intensity, and Ultra HD trailer playback.
+- **Built-in GitHub OTA Updater**:
+  - Automatic startup check against `BurbsKlopek/sway-rust` GitHub Releases with a live Top Rail update badge, streaming APK verification, and native Android TV `PackageInstaller` one-click upgrades.
 
 ## Build
 
