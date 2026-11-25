@@ -460,10 +460,10 @@ impl VideoQuality {
     }
     pub fn label(self) -> &'static str {
         match self {
-            VideoQuality::Uhd2160p => "2160p 4K",
+            VideoQuality::Uhd2160p => "4K Ultra HD",
             VideoQuality::Qhd1440p => "1440p",
             VideoQuality::Fhd1080p => "1080p",
-            VideoQuality::Auto => "Auto (2160p)",
+            VideoQuality::Auto => "Auto",
         }
     }
     pub fn height_px(self) -> i32 {

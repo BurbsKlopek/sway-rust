@@ -10,7 +10,7 @@ A **Pure Native Rust 4K OpenGL ES 3.0 Swipe-Deck Watch Tracker** for **Android T
   - Zero WebView, zero Jetpack Compose overhead, instant `<150ms` cold boot, deterministic 60/120fps frame pacing.
   - Custom 4-vertex 3D perspective quad projection (`egui::Mesh`) during card swipes and rewinds, paired with weightless resting levitation and orbital liquid-glass rim shimmer.
 - **TV Remote Swipe Presets**:
-  - **Three-Way Remote (Default)**: `→` **Watchlist** · `↑` **Watched ✓** · `←` **Pass** · `↓` **Undo Rewind** · `OK` **Details & 2160p 4K Trailer** · `Back` **Focus Top Rail**.
+  - **Three-Way Remote (Default)**: `→` **Watchlist** · `↑` **Watched ✓** · `←` **Pass** · `↓` **Undo Rewind** · `OK` **Details & Trailer** · `Back` **Focus Top Rail**.
   - **Split Left & Right**: `→` **Watched** · `←` **Watchlist** · `↓` **Pass**.
   - **Focus Buttons**: Standard D-Pad navigation across interactive action pills.
 - **Native Trakt & Simkl Cloud Sync**:
@@ -22,7 +22,7 @@ A **Pure Native Rust 4K OpenGL ES 3.0 Swipe-Deck Watch Tracker** for **Android T
 - **Liquid-Glass & 4K Customization**:
   - **6 Dual-Tone Glass Themes**: `Aurora Prism`, `Midnight Nebula`, `Crimson Velvet`, `Obsidian Gold`, `Arctic Sapphire`, `Titanium Neon`.
   - **4 Bundled Cinema Display Fonts**: `Outfit`, `Fraunces`, `Syne`, and `Space Grotesk` paired with `Plus Jakarta Sans`.
-  - Separable multi-pass cinema backdrop blur, adjustable glass crystal intensity, and **2160p (4K UHD)** default trailer quality.
+  - Separable multi-pass cinema backdrop blur, adjustable glass crystal intensity, and Ultra HD trailer playback.
 
 ## Build
 

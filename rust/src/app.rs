@@ -594,12 +594,9 @@ impl SwayApp {
         {
             let q = self.state.settings.default_video_quality;
             if bridge::launch_trailer(item, q, Some(yt)) {
-                self.show_toast(
-                    format!("Launching {} trailer ({})", item.title, q.label()),
-                    None,
-                );
+                self.show_toast(format!("Launching {} trailer", item.title), None);
             } else {
-                self.show_toast("No YouTube / 4K video player installed", None);
+                self.show_toast("No YouTube / video player installed", None);
             }
             return;
         }
@@ -607,7 +604,7 @@ impl SwayApp {
             return;
         }
         self.resolving_trailer = true;
-        self.show_toast("Finding official 2160p 4K trailer…", None);
+        self.show_toast("Finding official trailer…", None);
         let item_c = item.clone();
         let tx = self.tx.clone();
         let ctx_c = ctx.clone();
@@ -1301,7 +1298,7 @@ impl SwayApp {
                 top_item.overview.chars().take(308).collect::<String>()
             )
         } else if top_item.overview.is_empty() {
-            "Select Details & 4K Trailer to explore full cast, ratings, and official 2160p preview."
+            "Select Details to explore full cast, ratings, and official trailer."
                 .to_string()
         } else {
             top_item.overview.clone()
@@ -1369,7 +1366,7 @@ impl SwayApp {
             ui.add_space(6.0);
             if Self::action_dock_pill(
                 ui,
-                "OK · Details & 2160p",
+                "OK · Details",
                 theme.primary(),
                 dock_mode && self.deck_btn_idx == 3,
             ) {
@@ -2969,10 +2966,9 @@ impl SwayApp {
 
                     ui.add_space(16.0);
                     ui.horizontal_wrapped(|ui| {
-                        let q_lbl = this.state.settings.default_video_quality.label();
                         if Self::action_dock_pill(
                             ui,
-                            &format!("▶ Watch {q_lbl} Trailer"),
+                            "▶ Watch Trailer",
                             primary,
                             this.detail_btn_idx == 0,
                         ) {
